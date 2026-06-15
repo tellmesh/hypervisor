@@ -11,3 +11,8 @@ hypervisor --help
 ```
 
 Monorepo umbrella (agents, domains, examples): `../tellmesh/`.
+
+
+## License
+
+Licensed under Apache-2.0.

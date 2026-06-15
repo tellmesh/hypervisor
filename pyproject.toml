@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hypervisor"
-version = "0.5.6"
+version = "0.5.7"
 description = "Contract registry, domain packs, deployment registry and hypervisor control plane"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -25,6 +25,9 @@ dependencies = [
 
 [project.scripts]
 hypervisor = "hypervisor.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]

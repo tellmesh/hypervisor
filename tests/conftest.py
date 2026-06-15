@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import os
+
+os.environ.setdefault("HYPERVISOR_REPO_ROOT", "/home/tom/github/tellmesh/tellmesh")
+
 import pytest
 
 
