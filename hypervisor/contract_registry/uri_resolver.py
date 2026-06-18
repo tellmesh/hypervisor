@@ -100,8 +100,31 @@ def _agent_contract_uri(agent_name: str) -> str:
     return f"contract://agent/{agent_name}"
 
 
+def _path_from_deployment(deployment, root: Path, agents_dir: Path) -> Path | None:
+    contract = deployment.metadata.get("contract")
+    if contract:
+        path = root / str(contract)
+        if path.is_file():
+            return path
+    if deployment.target_uri.startswith("local://agents/generated/"):
+        package = deployment.target_uri.rsplit("/", 1)[-1]
+        candidate = agents_dir / f"{package}.yaml"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _scan_agent_yaml(normalized: str, agents_dir: Path) -> Path | None:
+    for path in sorted(agents_dir.glob("*.yaml")):
+        agent = _read_yaml(path).get("agent") or {}
+        agent_name = str(agent.get("name") or "")
+        package = str(agent.get("python_package") or path.stem)
+        if normalized in {agent_name, package, path.stem, _slug_to_snake(agent_name)}:
+            return path
+    return None
+
+
 def resolve_contract_path(name: str, root: Path) -> Path | None:
-    """Resolve logical agent or deployment name to contracts/agents/*.yaml."""
     normalized = name.strip().strip("/")
     if not normalized:
         return None
@@ -114,46 +137,22 @@ def resolve_contract_path(name: str, root: Path) -> Path | None:
 
     deployment = registry.by_id(normalized)
     if deployment is not None:
-        contract = deployment.metadata.get("contract")
-        if contract:
-            path = root / str(contract)
-            if path.is_file():
-                return path
-        if deployment.target_uri.startswith("local://agents/generated/"):
-            package = deployment.target_uri.rsplit("/", 1)[-1]
-            candidate = agents_dir / f"{package}.yaml"
-            if candidate.is_file():
-                return candidate
+        found = _path_from_deployment(deployment, root, agents_dir)
+        if found:
+            return found
 
     agent_ref = normalized if normalized.startswith("agent://") else f"agent://{normalized}"
     for item in registry.deployments:
         if item.agent_ref == agent_ref:
-            contract = item.metadata.get("contract")
-            if contract:
-                path = root / str(contract)
-                if path.is_file():
-                    return path
-            if item.target_uri.startswith("local://agents/generated/"):
-                package = item.target_uri.rsplit("/", 1)[-1]
-                candidate = agents_dir / f"{package}.yaml"
-                if candidate.is_file():
-                    return candidate
+            found = _path_from_deployment(item, root, agents_dir)
+            if found:
+                return found
 
-    direct_candidates = [
-        agents_dir / f"{normalized}.yaml",
-        agents_dir / f"{_slug_to_snake(normalized)}.yaml",
-    ]
-    for candidate in direct_candidates:
+    for candidate in (agents_dir / f"{normalized}.yaml", agents_dir / f"{_slug_to_snake(normalized)}.yaml"):
         if candidate.is_file():
             return candidate
 
-    for path in sorted(agents_dir.glob("*.yaml")):
-        agent = _read_yaml(path).get("agent") or {}
-        agent_name = str(agent.get("name") or "")
-        package = str(agent.get("python_package") or path.stem)
-        if normalized in {agent_name, package, path.stem, _slug_to_snake(agent_name)}:
-            return path
-    return None
+    return _scan_agent_yaml(normalized, agents_dir)
 
 
 def _format_schema_results(results: list[Any]) -> list[dict[str, Any]]:
@@ -417,6 +416,59 @@ def generate_agent_contract(
     }
 
 
+def _collect_contract_artifact(path: Path, root: Path, artifacts: list[dict[str, Any]]) -> None:
+    artifacts.append(_artifact_entry(kind="contract", path=path, root=root))
+
+
+def _collect_agent_artifacts(package: str, root: Path, artifacts: list[dict[str, Any]]) -> None:
+    output_dir = root / "agents" / "generated" / package
+    if not output_dir.is_dir():
+        return
+    for rel in GENERATED_AGENT_FILES:
+        file_path = output_dir / rel
+        if file_path.is_file():
+            artifacts.append(_artifact_entry(kind="agent", path=file_path, root=root))
+
+
+def _collect_deployment_artifacts(agent_name: str, root: Path, artifacts: list[dict[str, Any]]) -> None:
+    registry = load_deployment_registry(root)
+    for deployment in registry.deployments:
+        if deployment.agent_ref != f"agent://{agent_name}":
+            continue
+        artifacts.append(
+            {
+                "kind": "deployment",
+                "id": deployment.id,
+                "target_uri": deployment.target_uri,
+                "health_uri": deployment.health_uri,
+                "path": "deployments/agent_deployments.yaml",
+            }
+        )
+
+
+def _collect_capability_artifacts(contract: dict[str, Any], artifacts: list[dict[str, Any]]) -> None:
+    for cap in contract.get("capabilities") or []:
+        if not isinstance(cap, dict):
+            continue
+        artifacts.append(
+            {
+                "kind": "capability",
+                "name": cap.get("name"),
+                "type": cap.get("type"),
+                "uri": cap.get("uri"),
+                "command": cap.get("command"),
+                "input_schema": cap.get("input_schema"),
+                "output_schema": cap.get("output_schema"),
+            }
+        )
+
+
+def _collect_proto_artifacts(contract: dict[str, Any], root: Path, artifacts: list[dict[str, Any]]) -> None:
+    schema_refs = _schema_refs_from_contract(contract)
+    for proto_path in _find_proto_files(root, schema_refs):
+        artifacts.append(_artifact_entry(kind="proto", path=proto_path, root=root, extra={"schemas": sorted(schema_refs)}))
+
+
 def fetch_agent_artifacts(
     name: str,
     root: Path,
@@ -443,55 +495,19 @@ def fetch_agent_artifacts(
     package = str(agent.get("python_package") or path.stem)
     artifacts: list[dict[str, Any]] = []
 
-    def include(kind: str) -> bool:
+    def _include(kind: str) -> bool:
         return kinds is None or kind in kinds
 
-    if include("contract"):
-        artifacts.append(_artifact_entry(kind="contract", path=path, root=root))
-
-    if include("agent"):
-        output_dir = root / "agents" / "generated" / package
-        if output_dir.is_dir():
-            for rel in GENERATED_AGENT_FILES:
-                file_path = output_dir / rel
-                if file_path.is_file():
-                    artifacts.append(_artifact_entry(kind="agent", path=file_path, root=root))
-
-    if include("deployment"):
-        registry = load_deployment_registry(root)
-        for deployment in registry.deployments:
-            if deployment.agent_ref != f"agent://{agent_name}":
-                continue
-            artifacts.append(
-                {
-                    "kind": "deployment",
-                    "id": deployment.id,
-                    "target_uri": deployment.target_uri,
-                    "health_uri": deployment.health_uri,
-                    "path": "deployments/agent_deployments.yaml",
-                }
-            )
-
-    if include("capability"):
-        for cap in contract.get("capabilities") or []:
-            if not isinstance(cap, dict):
-                continue
-            artifacts.append(
-                {
-                    "kind": "capability",
-                    "name": cap.get("name"),
-                    "type": cap.get("type"),
-                    "uri": cap.get("uri"),
-                    "command": cap.get("command"),
-                    "input_schema": cap.get("input_schema"),
-                    "output_schema": cap.get("output_schema"),
-                }
-            )
-
-    if include("proto"):
-        schema_refs = _schema_refs_from_contract(contract)
-        for proto_path in _find_proto_files(root, schema_refs):
-            artifacts.append(_artifact_entry(kind="proto", path=proto_path, root=root, extra={"schemas": sorted(schema_refs)}))
+    if _include("contract"):
+        _collect_contract_artifact(path, root, artifacts)
+    if _include("agent"):
+        _collect_agent_artifacts(package, root, artifacts)
+    if _include("deployment"):
+        _collect_deployment_artifacts(agent_name, root, artifacts)
+    if _include("capability"):
+        _collect_capability_artifacts(contract, artifacts)
+    if _include("proto"):
+        _collect_proto_artifacts(contract, root, artifacts)
 
     from generator.hashutil import file_sha256
 
@@ -514,6 +530,31 @@ def fetch_agent_artifacts(
     }
 
 
+def _handle_registry_uri(parts: list[str], uri: str, root: Path, level: str) -> dict[str, Any]:
+    if len(parts) >= 2 and parts[1] == "validate":
+        return validate_contract_registry_uri(root, uri=uri, level=level)
+    return fetch_registry_manifest(root, uri=uri)
+
+
+def _handle_target_agent_uri(
+    name: str,
+    parts: list[str],
+    uri: str,
+    root: Path,
+    *,
+    dry_run: bool,
+    overwrite: bool,
+    kinds: set[str] | None,
+) -> dict[str, Any]:
+    if len(parts) >= 3 and parts[2] == "validate":
+        return validate_agent_contract(name, root, uri=uri)
+    if len(parts) >= 3 and parts[2] == "generate":
+        return generate_agent_contract(name, root, uri=uri, dry_run=dry_run, overwrite=overwrite)
+    if len(parts) >= 3 and parts[2] == "artifacts":
+        return fetch_agent_artifacts(name, root, uri=uri, kinds=kinds)
+    return fetch_agent_contract(name, root, uri=uri)
+
+
 def handle_contract_uri(uri: str, root: Path) -> dict[str, Any]:
     parsed = urlparse(uri)
     parts = [part for part in parsed.path.strip("/").split("/") if part]
@@ -533,30 +574,17 @@ def handle_contract_uri(uri: str, root: Path) -> dict[str, Any]:
         raise ValueError("contract:// requires a target path")
 
     if parts[0] == "registry":
-        if len(parts) >= 2 and parts[1] == "validate":
-            return validate_contract_registry_uri(root, uri=uri, level=level)
-        return fetch_registry_manifest(root, uri=uri)
+        return _handle_registry_uri(parts, uri, root, level)
 
     if parts[0] == "agents" and len(parts) == 2:
-        slug = parts[1]
-        return fetch_agent_contract(slug, root, uri=uri)
+        return fetch_agent_contract(parts[1], root, uri=uri)
 
     if parts[0] == "agent":
         if len(parts) < 2:
             raise ValueError("contract://agent/{name} requires an agent name")
-        name = parts[1]
-        if len(parts) >= 3 and parts[2] == "validate":
-            return validate_agent_contract(name, root, uri=uri)
-        if len(parts) >= 3 and parts[2] == "generate":
-            return generate_agent_contract(
-                name,
-                root,
-                uri=uri,
-                dry_run=dry_run,
-                overwrite=overwrite,
-            )
-        if len(parts) >= 3 and parts[2] == "artifacts":
-            return fetch_agent_artifacts(name, root, uri=uri, kinds=kinds)
-        return fetch_agent_contract(name, root, uri=uri)
+        return _handle_target_agent_uri(
+            parts[1], parts, uri, root,
+            dry_run=dry_run, overwrite=overwrite, kinds=kinds,
+        )
 
     raise ValueError(f"unsupported contract URI: {uri}")

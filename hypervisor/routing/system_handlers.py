@@ -96,35 +96,28 @@ def _contract_uri_for_schema(agent_id: str, file_uri: str | None, *, repo: Path)
     return None
 
 
-def handle_schema_uri(parts: list[str], *, repo: Path) -> dict[str, Any]:
-    if len(parts) < 2 or parts[0] != "agent":
-        raise ValueError("schema:// supports schema://agent/{deployment_id}")
-    agent_id = parts[1]
-    registry = load_deployment_registry(root=repo)
-    deployment = registry.by_id(agent_id)
-    if deployment is None:
-        return {
-            "ok": False,
-            "result_type": "agent_schema",
-            "workflow_status": "completed_with_service_error",
-            "service_result_status": "failed",
-            "agent_id": agent_id,
-            "error": f"Deployment not found: {agent_id}",
-        }
+def _collect_schema_capabilities(
+    card_payload: dict[str, Any] | None,
+    contract: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    contract_caps = (contract or {}).get("capabilities") or []
+    runtime_caps = (card_payload or {}).get("capabilities") or []
+    return [item for item in (runtime_caps or contract_caps) if isinstance(item, dict)]
 
-    inspection = inspect_agent(agent_id, root=repo)
+
+def _build_schema_response(
+    agent_id: str,
+    deployment,
+    inspection: dict[str, Any],
+    card_payload: dict[str, Any] | None,
+    contract_uri: str | None,
+    contract: dict[str, Any] | None,
+    capabilities: list[dict[str, Any]],
+    repo: Path,
+) -> dict[str, Any]:
     card_probe = inspection.get("card") or {}
-    card_payload = card_probe.get("payload") if isinstance(card_probe, dict) else None
-    card_payload = card_payload if isinstance(card_payload, dict) else None
-    contract_uri, contract = _read_contract(_contract_path_for_agent(agent_id, repo=repo))
-    contract_capabilities = (contract or {}).get("capabilities") or []
-    runtime_capabilities = (card_payload or {}).get("capabilities") or []
-    capabilities = runtime_capabilities or contract_capabilities
-    capabilities = [item for item in capabilities if isinstance(item, dict)]
-
     effective_health_uri = inspection.get("effective_health_uri") or deployment.health_uri
-    card_uri = card_probe.get("uri") if isinstance(card_probe, dict) else None
-    card_uri = card_uri or deployment.card_uri
+    card_uri = (card_probe.get("uri") if isinstance(card_probe, dict) else None) or deployment.card_uri
     return {
         "ok": bool(card_payload or contract),
         "result_type": "agent_schema",
@@ -150,6 +143,31 @@ def handle_schema_uri(parts: list[str], *, repo: Path) -> dict[str, Any]:
             "card": card_uri,
         },
     }
+
+
+def handle_schema_uri(parts: list[str], *, repo: Path) -> dict[str, Any]:
+    if len(parts) < 2 or parts[0] != "agent":
+        raise ValueError("schema:// supports schema://agent/{deployment_id}")
+    agent_id = parts[1]
+    registry = load_deployment_registry(root=repo)
+    deployment = registry.by_id(agent_id)
+    if deployment is None:
+        return {
+            "ok": False,
+            "result_type": "agent_schema",
+            "workflow_status": "completed_with_service_error",
+            "service_result_status": "failed",
+            "agent_id": agent_id,
+            "error": f"Deployment not found: {agent_id}",
+        }
+
+    inspection = inspect_agent(agent_id, root=repo)
+    card_probe = inspection.get("card") or {}
+    card_payload = card_probe.get("payload") if isinstance(card_probe, dict) else None
+    card_payload = card_payload if isinstance(card_payload, dict) else None
+    contract_uri, contract = _read_contract(_contract_path_for_agent(agent_id, repo=repo))
+    capabilities = _collect_schema_capabilities(card_payload, contract)
+    return _build_schema_response(agent_id, deployment, inspection, card_payload, contract_uri, contract, capabilities, repo)
 
 
 def handle_repair_uri(

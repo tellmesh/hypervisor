@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from hypervisor.agent_describe.collect import (
     agent_kind,
@@ -21,6 +22,44 @@ from hypervisor.deployment_registry.selector import resolve_deployment
 from hypervisor.paths import find_repo_root
 
 
+def _agent_meta_from_contract(contract: dict[str, Any], is_operator: bool) -> dict[str, Any]:
+    agent_meta = contract.get("metadata") if is_operator else (contract.get("agent") or {})
+    if not agent_meta and not is_operator:
+        agent_meta = contract.get("agent") or {}
+    return agent_meta
+
+
+def _collect_agent_data(
+    selector: str,
+    repo: Path,
+    deployment,
+    agent_name: str,
+    contract_path: Path | None,
+    contract: dict[str, Any],
+    is_operator: bool,
+    kind: str,
+    package_dir: Path | None,
+    markpact_blocks: list[str],
+    files: list[dict[str, Any]],
+    all_deployments,
+) -> dict[str, Any]:
+    return {
+        "selector": selector,
+        "deployment_id": deployment.id,
+        "agent_ref": deployment.agent_ref,
+        "agent_name": agent_name,
+        "contract_path": rel(repo, contract_path),
+        "contract_format": "operator_yaml" if is_operator else "yaml",
+        "markpact_in_readme": bool(markpact_blocks),
+        "package_path": rel(repo, package_dir),
+        "domain_pack": find_domain_pack(repo, contract_path, deployment, contract),
+        "files": files,
+        "is_operator": is_operator,
+        "agent_kind": kind,
+        "deployments": [item.id for item in all_deployments],
+    }
+
+
 def describe_agent(
     selector: str,
     *,
@@ -32,9 +71,7 @@ def describe_agent(
     contract_path = find_contract_path(repo, agent_name, deployment)
     contract = read_yaml(contract_path) if contract_path else {}
     is_operator = contract.get("kind") == "hypervisor.operator_agent"
-    agent_meta = contract.get("metadata") if is_operator else (contract.get("agent") or {})
-    if not agent_meta and not is_operator:
-        agent_meta = contract.get("agent") or {}
+    agent_meta = _agent_meta_from_contract(contract, is_operator)
     package_rel = package_relative_path(deployment, repo)
     package_dir = repo / package_rel if package_rel else None
     kind = agent_kind(deployment, is_operator=is_operator)
@@ -46,21 +83,7 @@ def describe_agent(
     agent_caps = [cap for cap in registry.capabilities if cap.agent == agent_name]
     all_deployments = load_deployment_registry(repo).by_agent_ref(deployment.agent_ref)
     run_plan = safe_run_plan(deployment, repo)
-    data = {
-        "selector": selector,
-        "deployment_id": deployment.id,
-        "agent_ref": deployment.agent_ref,
-        "agent_name": agent_name,
-        "contract_path": rel(repo, contract_path),
-        "contract_format": "operator_yaml" if is_operator else "yaml",
-        "markpact_in_readme": bool(markpact_blocks),
-        "package_path": rel(repo, package_dir),
-        "domain_pack": domain_pack,
-        "files": files,
-        "is_operator": is_operator,
-        "agent_kind": kind,
-        "deployments": [item.id for item in all_deployments],
-    }
+    data = _collect_agent_data(selector, repo, deployment, agent_name, contract_path, contract, is_operator, kind, package_dir, markpact_blocks, files, all_deployments)
     markdown = render_markdown(
         RenderContext(
             repo=repo,
